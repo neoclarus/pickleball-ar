@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Pickleball AR 球場</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; height: 100vh; width: 100vw; }
+
+#start-screen {
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 24px; z-index: 200;
+  background: #000;
+}
+#start-screen h1 { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+#start-screen p { font-size: 15px; color: rgba(255,255,255,0.6); text-align: center; line-height: 1.7; max-width: 280px; }
+#start-screen ul { font-size: 14px; color: rgba(255,255,255,0.55); line-height: 2; list-style: none; text-align: left; }
+#start-screen ul li::before { content: "· "; }
+
+#ar-button {
+  background: #fff; color: #000; border: none;
+  padding: 16px 48px; border-radius: 50px; font-size: 18px; font-weight: 600;
+  cursor: pointer; margin-top: 8px;
+}
+#ar-button:active { opacity: 0.8; }
+
+#hint {
+  position: fixed; bottom: 130px; left: 50%; transform: translateX(-50%);
+  font-size: 15px; color: rgba(255,255,255,0.75); text-align: center;
+  line-height: 1.6; display: none; z-index: 100; pointer-events: none;
+  background: rgba(0,0,0,0.4); padding: 10px 20px; border-radius: 12px;
+  backdrop-filter: blur(8px);
+}
+
+#controls {
+  position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+  display: none; gap: 12px; z-index: 100; flex-direction: row;
+}
+.ctrl-btn {
+  background: rgba(255,255,255,0.15); border: 1.5px solid rgba(255,255,255,0.35);
+  color: #fff; padding: 12px 24px; border-radius: 50px; font-size: 15px;
+  font-weight: 500; cursor: pointer; backdrop-filter: blur(8px);
+}
+.ctrl-btn:active { background: rgba(255,255,255,0.3); }
+
+#legend {
+  position: fixed; top: 20px; left: 16px; display: none;
+  flex-direction: column; gap: 6px; z-index: 100;
+  background: rgba(0,0,0,0.45); padding: 10px 14px; border-radius: 12px;
+  backdrop-filter: blur(8px);
+}
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: rgba(255,255,255,0.8); }
+.legend-dot { width: 20px; height: 3px; border-radius: 2px; }
+
+#not-supported {
+  position: fixed; inset: 0; display: none; flex-direction: column;
+  align-items: center; justify-content: center; gap: 16px; z-index: 300;
+  background: #000; text-align: center; padding: 32px;
+}
+#not-supported h2 { font-size: 22px; }
+#not-supported p { font-size: 15px; color: rgba(255,255,255,0.65); line-height: 1.7; max-width: 300px; }
+#not-supported code { background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 4px; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div id="start-screen">
+  <h1>🏓 Pickleball AR</h1>
+  <p>用 AR 在地面顯示 1:1 真實比例的匹克球場線條</p>
+  <ul>
+    <li>標準場地 20 × 44 英尺</li>
+    <li>含廚房線、中線、發球區</li>
+    <li>點擊地面放置，可旋轉</li>
+  </ul>
+  <button id="ar-button">開始 AR</button>
+</div>
+
+<div id="not-supported">
+  <h2>無法啟動 AR</h2>
+  <p>請使用 <strong>iPhone Safari</strong> 開啟此頁面<br><br>
+  需要 iOS 16 以上版本<br>
+  以及支援 ARKit 的 iPhone（iPhone XR 以上）</p>
+  <p style="margin-top:12px; font-size:13px; color:rgba(255,255,255,0.4);">
+    技術要求：WebXR hit-test API
+  </p>
+</div>
+
+<div id="hint">慢慢對著地面移動 iPhone<br>等白色圓圈出現後，點擊螢幕放置球場</div>
+
+<div id="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#ffffff"></div>球場邊線 / 端線</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffffff"></div>廚房線（非截擊區）</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffffff"></div>中線</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffee44"></div>網子位置</div>
+</div>
+
+<div id="controls">
+  <button class="ctrl-btn" id="btn-rotate">旋轉 90°</button>
+  <button class="ctrl-btn" id="btn-reset">重新放置</button>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+const FT = 0.3048;
+const COURT_W = 20 * FT;   // 6.096m
+const COURT_L = 44 * FT;   // 13.411m
+const KITCHEN = 7 * FT;    // 2.134m
+const LINE_W = 0.051;       // 2 inches per official rules
+
+let renderer, scene, camera, xrSession, hitTestSource, localRefSpace;
+let courtGroup = null;
+let reticle = null;
+let rotationY = 0;
+
+// ── Build court geometry ──────────────────────────────────────────
+function addLine(group, mat, x1, z1, x2, z2) {
+  const dx = x2 - x1, dz = z2 - z1;
+  const len = Math.sqrt(dx * dx + dz * dz);
+  const angle = Math.atan2(dx, dz);
+  const geo = new THREE.PlaneGeometry(LINE_W, len);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.rotation.z = angle;
+  mesh.position.set((x1 + x2) / 2, 0.003, (z1 + z2) / 2);
+  group.add(mesh);
+}
+
+function buildCourt() {
+  const g = new THREE.Group();
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+  const yellow = new THREE.MeshBasicMaterial({ color: 0xffee44, side: THREE.DoubleSide });
+
+  const hw = COURT_W / 2;
+  const hl = COURT_L / 2;
+
+  // Outer boundary
+  addLine(g, white, -hw, -hl,  hw, -hl);   // baseline A
+  addLine(g, white, -hw,  hl,  hw,  hl);   // baseline B
+  addLine(g, white, -hw, -hl, -hw,  hl);   // sideline left
+  addLine(g, white,  hw, -hl,  hw,  hl);   // sideline right
+
+  // Kitchen (NVZ) lines
+  addLine(g, white, -hw, -hl + KITCHEN,  hw, -hl + KITCHEN);
+  addLine(g, white, -hw,  hl - KITCHEN,  hw,  hl - KITCHEN);
+
+  // Centre lines (in service boxes only — not through kitchen)
+  addLine(g, white, 0, -hl, 0, -hl + KITCHEN);
+  addLine(g, white, 0,  hl, 0,  hl - KITCHEN);
+
+  // Net line (yellow)
+  const netGeo = new THREE.PlaneGeometry(COURT_W + LINE_W, LINE_W * 0.6);
+  const net = new THREE.Mesh(netGeo, yellow);
+  net.rotation.x = -Math.PI / 2;
+  net.position.set(0, 0.004, 0);
+  g.add(net);
+
+  // Semi-transparent court fill so you can see the shape
+  const fillMat = new THREE.MeshBasicMaterial({
+    color: 0x4488ff, transparent: true, opacity: 0.06, side: THREE.DoubleSide
+  });
+  const fill = new THREE.Mesh(new THREE.PlaneGeometry(COURT_W, COURT_L), fillMat);
+  fill.rotation.x = -Math.PI / 2;
+  fill.position.y = 0.001;
+  g.add(fill);
+
+  return g;
+}
+
+function buildReticle() {
+  const geo = new THREE.RingGeometry(0.10, 0.14, 32);
+  geo.rotateX(-Math.PI / 2);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.matrixAutoUpdate = false;
+  mesh.visible = false;
+  return mesh;
+}
+
+// ── AR session ───────────────────────────────────────────────────
+async function startAR() {
+  if (!navigator.xr) { showNotSupported(); return; }
+
+  let supported = false;
+  try { supported = await navigator.xr.isSessionSupported('immersive-ar'); } catch(e) {}
+  if (!supported) { showNotSupported(); return; }
+
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.xr.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 200);
+  scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+  reticle = buildReticle();
+  scene.add(reticle);
+
+  try {
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['hit-test', 'local'],
+      optionalFeatures: ['dom-overlay'],
+      domOverlay: { root: document.body }
+    });
+  } catch(e) {
+    showNotSupported('AR 啟動失敗：' + e.message); return;
+  }
+
+  renderer.xr.setReferenceSpaceType('local');
+  await renderer.xr.setSession(xrSession);
+
+  localRefSpace = await xrSession.requestReferenceSpace('local');
+  const viewerSpace = await xrSession.requestReferenceSpace('viewer');
+  hitTestSource = await xrSession.requestHitTestSource({ space: viewerSpace });
+
+  xrSession.addEventListener('end', onSessionEnd);
+  xrSession.addEventListener('select', onSelect);
+
+  document.getElementById('start-screen').style.display = 'none';
+  document.getElementById('hint').style.display = 'block';
+
+  renderer.setAnimationLoop(onFrame);
+}
+
+function onSelect() {
+  if (!reticle.visible) return;
+
+  if (!courtGroup) {
+    courtGroup = buildCourt();
+    scene.add(courtGroup);
+  }
+
+  const pos = new THREE.Vector3();
+  pos.setFromMatrixPosition(reticle.matrix);
+  courtGroup.position.copy(pos);
+  courtGroup.rotation.y = rotationY;
+
+  document.getElementById('hint').style.display = 'none';
+  document.getElementById('controls').style.display = 'flex';
+  document.getElementById('legend').style.display = 'flex';
+}
+
+function onFrame(time, frame) {
+  if (!frame) return;
+  const refSpace = renderer.xr.getReferenceSpace();
+  const results = frame.getHitTestResults(hitTestSource);
+
+  if (results.length > 0) {
+    const pose = results[0].getPose(refSpace);
+    reticle.visible = true;
+    reticle.matrix.fromArray(pose.transform.matrix);
+  } else {
+    reticle.visible = false;
+  }
+
+  renderer.render(scene, camera);
+}
+
+function onSessionEnd() {
+  hitTestSource?.cancel();
+  hitTestSource = null;
+  renderer.setAnimationLoop(null);
+  if (renderer.domElement) renderer.domElement.remove();
+  document.getElementById('start-screen').style.display = 'flex';
+  document.getElementById('controls').style.display = 'none';
+  document.getElementById('legend').style.display = 'none';
+  document.getElementById('hint').style.display = 'none';
+  courtGroup = null;
+}
+
+function showNotSupported(msg) {
+  const el = document.getElementById('not-supported');
+  el.style.display = 'flex';
+  document.getElementById('start-screen').style.display = 'none';
+  if (msg) el.querySelector('p').textContent = msg;
+}
+
+// ── Controls ─────────────────────────────────────────────────────
+document.getElementById('ar-button').addEventListener('click', startAR);
+
+document.getElementById('btn-rotate').addEventListener('click', () => {
+  if (!courtGroup) return;
+  rotationY += Math.PI / 2;
+  courtGroup.rotation.y = rotationY;
+});
+
+document.getElementById('btn-reset').addEventListener('click', () => {
+  if (courtGroup) { scene.remove(courtGroup); courtGroup = null; }
+  rotationY = 0;
+  document.getElementById('hint').style.display = 'block';
+  document.getElementById('controls').style.display = 'none';
+  document.getElementById('legend').style.display = 'none';
+});
+</script>
+</body>
+</html>
